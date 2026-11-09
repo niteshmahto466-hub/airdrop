@@ -20,16 +20,16 @@ const { BaseScene: Scene, Stage } = Scenes;
  *  Secrets (token, database, wallet key) come from Render environment variables.
  * ==================================================================== */
 const CONFIG = {
-  BOT_TOKEN: process.env.BOT_TOKEN || 'PASTE_NEW_BOT_TOKEN_HERE',
-  DATABASE_URL: process.env.DATABASE_URL || '',
+  BOT_TOKEN: (process.env.BOT_TOKEN || 'PASTE_NEW_BOT_TOKEN_HERE').trim(),
+  DATABASE_URL: (process.env.DATABASE_URL || '').trim(),
   DATABASE_SSL: process.env.DATABASE_SSL === 'true', // true only if you use Render's EXTERNAL db url
 
   // Hot wallet private key (WIF). Create one with:  node gen-wallet.js
-  DGB_WIF: process.env.DGB_WIF || '',
+  DGB_WIF: (process.env.DGB_WIF || '').trim(),
 
   // Public explorer APIs used to read UTXOs and broadcast. Tried in order.
   // Format: "insight|https://host/api"  or  "blockbook|https://host/api"   (comma separated)
-  EXPLORER_API_KEY: process.env.EXPLORER_API_KEY || '', // free key from nownodes.io (sent as the "api-key" header)
+  EXPLORER_API_KEY: (process.env.EXPLORER_API_KEY || '').trim(), // free key from nownodes.io (sent as the "api-key" header)
   EXPLORER_APIS: (process.env.EXPLORER_APIS || 'blockbook|https://dgbbook.nownodes.io/api').split(',').map((s) => s.trim()).filter(Boolean),
   FEE_SAT_PER_BYTE: Number(process.env.FEE_SAT_PER_BYTE) || 500, // network fee; 500 sat/byte is about 0.001 DGB per withdrawal
   DUST_SAT: 100000, // change smaller than this (0.001 DGB) is added to the fee
@@ -242,6 +242,19 @@ function isValidDgbAddress(addr) {
   try { bitcoin.address.toOutputScript(addr, DGB); return true; } catch (e) { return false; }
 }
 
+function hintFor(msg) {
+  const m = String(msg);
+  if (/HTTP 401|API_key|NOT set/i.test(m)) return 'Set a valid EXPLORER_API_KEY (free key from nownodes.io) in Render -> Environment, then redeploy.';
+  if (/HTTP 403/i.test(m)) return 'The explorer refused the key (blocked or plan limit). Check your NOWNodes dashboard.';
+  if (/HTTP 404/i.test(m)) return 'Wrong explorer address in EXPLORER_APIS. It should be: blockbook|https://dgbbook.nownodes.io/api';
+  if (/HTTP 429/i.test(m)) return 'Too many requests to the explorer. Wait a minute, or check your NOWNodes limit.';
+  if (/Insufficient hot wallet/i.test(m)) return 'The hot wallet has too little confirmed DGB. Send DGB to the hot wallet address and wait about a minute.';
+  if (/fee/i.test(m)) return 'The fee may be too low. Add FEE_SAT_PER_BYTE = 1000 in Render -> Environment.';
+  if (/missing inputs|conflict|spent/i.test(m)) return 'The coins were just spent by another payout. Wait a minute and try again.';
+  if (/timeout|fetch failed|ENOTFOUND|ECONN/i.test(m)) return 'The explorer could not be reached. Try again in a minute.';
+  return '';
+}
+
 async function httpJson(method, url, body, contentType) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 20000);
@@ -267,16 +280,15 @@ async function fetchUtxos(address) {
   const errors = [];
   for (const api of EXPLORERS) {
     try {
-      if (api.type === 'blockbook') {
-        const r = await httpJson('GET', `${api.url}/v2/utxo/${address}`);
-        if (r.ok && Array.isArray(r.json)) return r.json.map((u) => ({ txid: u.txid, vout: u.vout, sat: Number(u.value) }));
-      } else {
-        const r = await httpJson('GET', `${api.url}/addr/${address}/utxo`);
-        if (r.ok && Array.isArray(r.json)) {
-          return r.json.map((u) => ({ txid: u.txid, vout: u.vout, sat: u.satoshis != null ? Number(u.satoshis) : Math.round(Number(u.amount) * 1e8) }));
-        }
+      const url = api.type === 'blockbook' ? `${api.url}/v2/utxo/${address}` : `${api.url}/addr/${address}/utxo`;
+      const r = await httpJson('GET', url);
+      if (r.ok && Array.isArray(r.json)) {
+        if (api.type === 'blockbook') return r.json.map((u) => ({ txid: u.txid, vout: u.vout, sat: Number(u.value) }));
+        return r.json.map((u) => ({ txid: u.txid, vout: u.vout, sat: u.satoshis != null ? Number(u.satoshis) : Math.round(Number(u.amount) * 1e8) }));
       }
-      errors.push(api.url + ' -> unexpected reply');
+      // show the real reason (HTTP code + start of the reply), e.g. "HTTP 401: Missing API_key"
+      errors.push(api.url + ' -> HTTP ' + r.status + ': ' + String(r.text).replace(/\s+/g, ' ').slice(0, 120) +
+        (CONFIG.EXPLORER_API_KEY ? '' : ' [EXPLORER_API_KEY is NOT set]'));
     } catch (e) { errors.push(api.url + ' -> ' + e.message); }
   }
   throw safeError('Explorer API unavailable: ' + errors.join('; '));
@@ -305,12 +317,18 @@ async function broadcastRaw(hex) {
   const rejects = [];
   for (const api of EXPLORERS) {
     try {
-      const r = api.type === 'blockbook'
+      let r = api.type === 'blockbook'
         ? await httpJson('POST', `${api.url}/v2/sendtx/`, hex, 'text/plain')
         : await httpJson('POST', `${api.url}/tx/send`, { rawtx: hex });
-      if (r.ok && !(r.json && r.json.error)) return;
-      if (/already|known|exists|in block chain/i.test(r.text || '')) return; // same tx already accepted
-      rejects.push(api.url + ' -> ' + String(r.text).slice(0, 160));
+      const accepted = (x) => x.ok && !(x.json && x.json.error);
+      const dup = (x) => /already|known|exists|in block chain/i.test(x.text || ''); // same tx already accepted
+      if (accepted(r) || dup(r)) return;
+      if (api.type === 'blockbook') { // second way: hex in the URL (the same transaction, so repeating is harmless)
+        const g = await httpJson('GET', `${api.url}/v2/sendtx/${hex}`);
+        if (accepted(g) || dup(g)) return;
+        r = { status: r.status, text: 'POST: HTTP ' + r.status + ' ' + r.text + ' | GET: HTTP ' + g.status + ' ' + g.text };
+      }
+      rejects.push(api.url + ' -> ' + String(r.text).replace(/\s+/g, ' ').slice(0, 220));
     } catch (e) { // timeout / network: we cannot know if it went through
       ambiguous = true;
       rejects.push(api.url + ' -> ' + e.message);
@@ -685,7 +703,7 @@ async function payInstant(ctx, uid, wallet, amt, kb) {
       await withUser(uid, (u) => { u.bal = round8((Number(u.bal) || 0) + amt); });
       await updateWithdrawal(wid, 'failed_refunded', null, err.message);
       ctx.reply('❌ Withdrawal could not be processed right now. Your balance has been restored, please try again later.').catch(() => {});
-      notifyAdmins('⚠️ Withdraw failed (refunded): user ' + uid + ', ' + fmt(amt) + ' ' + data.bot_cur + '\nReason: ' + err.message);
+      notifyAdmins('⚠️ Withdraw failed (refunded): user ' + uid + ', ' + fmt(amt) + ' ' + data.bot_cur + '\nReason: ' + err.message + (hintFor(err.message) ? '\n\n👉 ' + hintFor(err.message) : '') + '\n\nRun /diag for a full check.');
     } else { // unknown outcome (timeout): NOT refunded automatically, to avoid paying twice
       await updateWithdrawal(wid, 'review', null, err.message);
       ctx.reply('⏳ Your withdrawal is being verified by the team. You will be notified shortly.').catch(() => {});
@@ -713,6 +731,73 @@ bot.command('resolve', async (ctx) => {
     await withUser(r.rows[0].user_id, (u) => { u.bal = round8((Number(u.bal) || 0) + Number(r.rows[0].amount)); });
   }
   ctx.reply('Withdrawal #' + id + ' marked ' + action + '.');
+});
+
+/* ---------------- admin: /diag = full withdrawal self-check in plain words ---------------- */
+bot.command('diag', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const L = ['🔎 Withdrawal check', ''];
+  L.push('Mode: ' + (data.with_type === 'manual' ? 'MANUAL (requests go to the payout channel, nothing is sent automatically)' : 'AUTO INSTANT'));
+  L.push(keyPair ? '✅ Wallet key loaded. Hot wallet: ' + HOT_ADDRESS : '❌ DGB_WIF is missing or invalid in Render -> Environment');
+  L.push(CONFIG.EXPLORER_API_KEY ? '✅ EXPLORER_API_KEY is set' : '❌ EXPLORER_API_KEY is NOT set in Render -> Environment');
+  L.push('Explorer: ' + EXPLORERS.map((e) => e.type + ' ' + e.url).join(', '));
+  if (keyPair) {
+    try {
+      const sp = await getSpendable();
+      const total = sp.reduce((a, u) => a + u.sat, 0) / 1e8;
+      const owedRow = (await pool.query("SELECT COALESCE(SUM((data->>'bal')::numeric), 0) AS s FROM users WHERE data ? 'bal'")).rows[0];
+      const owed = owedRow ? Number(owedRow.s) : 0;
+      L.push('✅ Explorer works. Hot wallet holds ' + fmt(total) + ' DGB in ' + sp.length + ' coin(s)');
+      if (!sp.length) L.push('❌ The hot wallet is EMPTY. Send DGB to ' + HOT_ADDRESS + ' and wait about a minute.');
+      else if (total < owed) L.push('⚠️ Users together hold ' + fmt(owed) + ' DGB, more than the wallet has. Top up the wallet before they withdraw.');
+      else L.push('✅ Wallet covers all user balances (' + fmt(owed) + ' DGB).');
+      if (sp.length && total > 0) L.push('✅ Ready: withdrawals should work.');
+    } catch (e) {
+      L.push('❌ Explorer problem: ' + e.message);
+      const h = hintFor(e.message);
+      if (h) L.push('👉 ' + h);
+    }
+  }
+  ctx.reply(L.join('\n'), { disable_web_page_preview: true });
+});
+
+/* ---------------- admin: delete user data ---------------- */
+// /addbal <telegram id> <amount>   -> add DGB to a user's balance (use a negative amount to remove)
+bot.command('addbal', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const [, id, amt] = ctx.message.text.trim().split(/\s+/);
+  if (!/^\d+$/.test(id || '') || !isNumeric(amt)) return ctx.reply('Usage: /addbal <telegram id> <amount>\nExample: /addbal 5028581330 5');
+  const n = round8(Number(amt));
+  const res = await withUser(id, (u) => {
+    if (!u || u.bal === undefined) return null;
+    const nb = round8((Number(u.bal) || 0) + n);
+    if (nb < 0) return 'neg';
+    u.bal = nb;
+    return nb;
+  });
+  if (res === null) return ctx.reply('User not found. They must press /start in the bot first.');
+  if (res === 'neg') return ctx.reply('Balance cannot go below 0.');
+  ctx.reply('✅ Balance of ' + id + ' is now ' + fmt(res) + ' ' + data.bot_cur);
+});
+
+// /deluser <telegram id>   -> removes one user (balance, referrals, address) so they can register again
+bot.command('deluser', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const id = (ctx.message.text.split(/\s+/)[1] || '').trim();
+  if (!/^\d+$/.test(id)) return ctx.reply('Usage: /deluser <telegram id>\nExample: /deluser 123456789');
+  const r = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
+  await pool.query('DELETE FROM sessions WHERE key LIKE $1', [id + ':%']);
+  ctx.reply(r.rows.length ? '🗑 User ' + id + ' deleted.' : 'User ' + id + ' not found.');
+});
+
+// /resetall CONFIRM   -> deletes ALL users and balances (settings, channels and withdrawal history are kept)
+bot.command('resetall', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  if ((ctx.message.text.split(/\s+/)[1] || '') !== 'CONFIRM') {
+    return ctx.reply('⚠️ This deletes ALL users, balances and referrals and cannot be undone.\nTo continue send exactly:\n/resetall CONFIRM');
+  }
+  await pool.query('TRUNCATE users, sessions');
+  ctx.reply('🗑 All users deleted. The bot is now empty (settings were kept).');
 });
 
 /* ---------------- broadcast ---------------- */
@@ -845,9 +930,9 @@ bot.action(/adhymn_/, async (ctx) => {
         const sp = await getSpendable();
         const total = sp.reduce((s, u) => s + u.sat, 0) / 1e8;
         const owed = await pool.query("SELECT COALESCE(SUM((data->>'bal')::numeric), 0) AS s FROM users WHERE data ? 'bal'");
-        ctx.reply('💼 Hot wallet\nAddress: ' + HOT_ADDRESS + '\nBalance: ' + fmt(total) + ' DGB (' + sp.length + ' UTXOs)\n\n👥 Total user balances: ' + fmt(owed.rows[0].s) + ' DGB');
+        ctx.reply('💼 Hot wallet\nAddress: ' + HOT_ADDRESS + '\nBalance: ' + fmt(total) + ' DGB (' + sp.length + ' UTXOs)\n\n👥 Total user balances: ' + fmt(owed.rows[0] ? owed.rows[0].s : 0) + ' DGB');
       } catch (e) {
-        ctx.reply('❌ ' + e.message);
+        ctx.reply('❌ ' + e.message + (hintFor(e.message) ? '\n\n👉 ' + hintFor(e.message) : ''));
       }
     }
   } catch (e) { console.log(e); }
