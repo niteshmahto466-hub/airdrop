@@ -1,0 +1,29 @@
+{
+  "bot_admin": [
+    5028581330
+  ],
+  "block_url": "https://digiexplorer.info/tx/",
+  "bot_cur": "DGB",
+  "bonus": 0.1,
+  "reffer_bonus": 0.5,
+  "min_wd": 2,
+  "address": "🏁 Great. Lastly, please submit your DigiByte (DGB) wallet address (starts with D, S or dgb1).\n\n*Note:* Please send an address from your own wallet (for example DigiByte Go). Each address can be used by one account only.",
+  "welcome": "<b>✨ We are glad that you joined our DigiByte (DGB) Airdrop 🚀</b>\n\n<b>🎁 Bonus: </b>0.1 DGB (press the Bonus button after joining)\n<b>👫 Refer: </b>0.5 DGB per referral\n<b>📤 Minimum withdraw: </b>2 DGB\n\n⚠️ <b>All tasks will be reviewed by our team, and if incomplete, the drop may not be awarded. So you must complete all the tasks.</b>\n\n📢 <b><u>All Tasks Are Mandatory:</u></b>\n» <b>Join </b>@altcoindustory\n» <b>Join </b><a href=\"https://t.me/+Qsnl4DN24H8wNTE1\">Our Private Channel</a>\n» <b>Join </b>@AirdropNEPTUNE\n\nℹ️ <b>After completing all tasks press \"✅ Join Airdrop\"</b>",
+  "check": [
+    "@altcoindustory"
+  ],
+  "but": [
+    [
+      "📊 Statistics",
+      "📤 Withdraw"
+    ],
+    [
+      "🎁 Bonus"
+    ]
+  ],
+  "payout": "@TonOfficials",
+  "bot": true,
+  "bot_text": "Bot is <b>Turned Off</b>",
+  "broad_speed": 66.66666666666667,
+  "with_type": "auto-instant"
+}
