@@ -799,6 +799,23 @@ bot.command('decbal', async (ctx) => {
   ctx.reply('✅ Balance of ' + id + ' decreased: ' + fmt(res.old) + ' -> ' + fmt(res.nb) + ' ' + data.bot_cur);
 });
 
+// /setbal <telegram id> <amount>   -> SET a user's balance to an exact value (negative allowed, e.g. -10)
+bot.command('setbal', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const [, id, amt] = ctx.message.text.trim().split(/\s+/);
+  if (!/^\d+$/.test(id || '') || !isNumeric(amt)) {
+    return ctx.reply('Usage: /setbal <telegram id> <amount>\nExamples:\n/setbal 123456789 0\n/setbal 123456789 -10');
+  }
+  const res = await withUser(id, (u) => {
+    if (!u || u.bal === undefined) return null;
+    const old = round8(Number(u.bal) || 0);
+    u.bal = round8(Number(amt));
+    return { old, nb: u.bal };
+  });
+  if (res === null) return ctx.reply('User not found. They must press /start in the bot first.');
+  ctx.reply('✅ Balance of ' + id + ' set: ' + fmt(res.old) + ' -> ' + fmt(res.nb) + ' ' + data.bot_cur);
+});
+
 // /deluser <telegram id>   -> removes one user (balance, referrals, address) so they can register again
 bot.command('deluser', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
