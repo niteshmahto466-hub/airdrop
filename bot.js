@@ -780,6 +780,25 @@ bot.command('addbal', async (ctx) => {
   ctx.reply('✅ Balance of ' + id + ' is now ' + fmt(res) + ' ' + data.bot_cur);
 });
 
+// /decbal <telegram id> <amount|all>   -> DECREASE a user's balance (use "all" to set it to 0)
+bot.command('decbal', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const [, id, amt] = ctx.message.text.trim().split(/\s+/);
+  const isAll = String(amt || '').toLowerCase() === 'all';
+  if (!/^\d+$/.test(id || '') || (!isAll && (!isNumeric(amt) || Number(amt) <= 0))) {
+    return ctx.reply('Usage: /decbal <telegram id> <amount|all>\nExamples:\n/decbal 123456789 5\n/decbal 123456789 all');
+  }
+  const res = await withUser(id, (u) => {
+    if (!u || u.bal === undefined) return null;
+    const old = round8(Number(u.bal) || 0);
+    const nb = isAll ? 0 : Math.max(0, round8(old - Number(amt)));
+    u.bal = nb;
+    return { old, nb };
+  });
+  if (res === null) return ctx.reply('User not found. They must press /start in the bot first.');
+  ctx.reply('✅ Balance of ' + id + ' decreased: ' + fmt(res.old) + ' -> ' + fmt(res.nb) + ' ' + data.bot_cur);
+});
+
 // /deluser <telegram id>   -> removes one user (balance, referrals, address) so they can register again
 bot.command('deluser', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
